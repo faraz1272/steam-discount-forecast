@@ -1,0 +1,50 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# ---- Virtual environments ----
+.venv/
+env/
+venv/
+
+# ---- Jupyter Notebooks ----
+.ipynb_checkpoints/
+*.ipynb_convert/
+
+# ---- Data files ----
+# Keep raw data out of git (too large, private, or reproducible)
+data/
+*.csv
+*.tsv
+*.json
+*.parquet
+*.db
+*.sqlite
+
+# ---- Logs ----
+*.log
+logs/
+*.out
+
+# ---- OS / Editor junk ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# ---- Environment & secrets ----
+.env
+*.key
+*.pem
+*.crt
+*.cfg
+*.ini
+
+# ---- Build / Dist ----
+dist/
+build/
+*.egg-info/
