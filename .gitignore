@@ -50,3 +50,4 @@ build/
 *.egg-info/
 
 Kaggle datasets/
+data/
