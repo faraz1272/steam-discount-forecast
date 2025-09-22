@@ -5,3 +5,10 @@ scikit-learn
 matplotlib
 seaborn
 requests
+
+xgboost
+lightgbm
+catboost
+
+tensorflow
+keras
