@@ -8,9 +8,9 @@ import json
 import numpy as np
 
 # Project imports
-from steam_sale.config import settings
-from steam_sale.logging_setup import logger
-from steam_sale.exceptions import ModelNotLoadedError, BadRequestError
+from src.steam_sale.config import settings
+from src.steam_sale.logging_setup import logger
+from src.steam_sale.exceptions import ModelNotLoadedError, BadRequestError
 
 # using joblib for model loading
 try:
@@ -174,7 +174,7 @@ class ModelService:
             raise BadRequestError(f"Missing required features: {missing}")
         
         arr = np.array(vector, dtype=float)
-        arr = arr.shape(1, -1) # reshaping to 2D array for model input
+        arr = arr.reshape(1, -1) # reshaping to 2D array for model input
 
         return arr
     
@@ -223,6 +223,8 @@ class ModelService:
         # deciding the class based on threshold
         if threshold is not None:
             cut  = float(threshold)
+        else:
+            cut = self.default_threshold
 
         will_discount = False
         if score >= cut:
