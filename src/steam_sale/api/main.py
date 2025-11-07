@@ -1,5 +1,6 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from time import perf_counter
 
 from src.steam_sale.config import settings
 from src.steam_sale.logging_setup import logger
@@ -12,6 +13,35 @@ app = FastAPI(
     title=settings.APP_NAME if hasattr(settings, "APP_NAME") else "Steam Sale Prediction API",
     default_response_class=JSONResponse,
 )
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """
+    Middleware that logs each HTTP request:
+    - method (GET/POST)
+    - path (/predict, /health, etc.)
+    - status code (200, 400, 500...)
+    - how long it took (ms)
+    """
+    start_time = perf_counter()  # recording the time before handling the request
+
+    response = await call_next(request)  # waiting for FastAPI to process the request
+
+    end_time = perf_counter()  # recording the time after response is ready
+    duration_ms = (end_time - start_time) * 1000.0  # converting to milliseconds
+
+    # Using JSON logger so logs are structured and machine-readable
+    logger.info(
+        "request_completed",
+        extra={
+            "method": request.method,
+            "path": request.url.path,
+            "status_code": response.status_code,
+            "duration_ms": round(duration_ms, 2),
+        },
+    )
+
+    return response
 
 @app.on_event("startup")
 async def startup_event():
