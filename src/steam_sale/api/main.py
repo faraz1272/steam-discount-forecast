@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.responses import JSONResponse
 from time import perf_counter
 
@@ -7,6 +7,7 @@ from src.steam_sale.logging_setup import logger
 from src.steam_sale.models.predictor import model_service
 from src.steam_sale.schemas import PredictRequest, PredictResponse, HealthResponse
 from src.steam_sale.exceptions import SteamSaleError, ModelNotLoadedError, BadRequestError
+from src.steam_sale.insights import insight_service
 
 
 app = FastAPI(
@@ -71,7 +72,8 @@ async def health_check():
     )
 
 @app.post("/predict", response_model=PredictResponse)
-async def predict(payload: PredictRequest):
+async def predict(payload: PredictRequest,
+                  include_insights: bool = Query(False, description="If true, inclue insights in response")):
     """This is the main prediction endpoint.
     It accepts a PredictRequest, calls model_service to get a prediction,
     and returns a PredictResponse.
@@ -84,6 +86,15 @@ async def predict(payload: PredictRequest):
             features=payload.features,
             threshold=payload.threshold,
         )
+
+        if include_insights:
+            insights = insight_service.build_insights(
+                appid=payload.appid,
+                prediction=result,
+                features=payload.features,
+            )
+            result["insights"] = insights
+
         return PredictResponse(**result)
     except BadRequestError as e:
         raise HTTPException(status_code=400, detail=str(e))

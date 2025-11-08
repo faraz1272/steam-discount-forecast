@@ -18,7 +18,7 @@ class PredictRequest(BaseModel):
     features: Dict[str, Any] = Field(..., description="Feature mapping: name to value (must match feature_list.json)")
 
     # Optional threshold for classification
-    threshold: Optional[float] = Field(None, description="Optional probability cutoff override (0 to 1)")
+    threshold: Optional[float] = Field(None, ge=0, le=1, description="Optional probability cutoff override (0 to 1)")
 
     @field_validator("features")
     @classmethod
@@ -43,6 +43,7 @@ class PredictResponse(BaseModel):
     will_discount: bool
     score: float
     threshold: float
+    insights: Optional[Dict[str, Any]] = None
 
 class HealthResponse(BaseModel):
     """

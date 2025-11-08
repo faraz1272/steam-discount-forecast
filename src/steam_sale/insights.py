@@ -4,6 +4,14 @@ from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
 
 from src.steam_sale.logging_setup import logger
+from src.steam_sale.config import settings
+
+import requests
+
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None # OpenAI is optional and may not be installed
 
 @dataclass
 class InsightService:
@@ -13,6 +21,28 @@ class InsightService:
     """
 
     openai_enabled: bool = False
+    _openai_client: Any | None = None
+    _openai_model: str | None = None
+
+    def __post_init__(self):
+        """
+        Post-initialization to set up OpenAI client if enabled.
+        """
+
+        api_key = settings.OPENAI_API_KEY
+        model = settings.OPENAI_MODEL
+
+        if api_key and model and OpenAI is not None:
+            try:
+                # creating OpenAI client instance
+                self._openai_client = OpenAI(api_key=api_key)
+                self._openai_model = model
+                self.openai_enabled = True
+                logger.info("insights_openai_enabled", extra={"error": model})
+            except Exception as e:
+                logger.warning("insights_openai_init_falied", extra={"error": str(e)})
+        else:
+            self.openai_enabled = False
 
     def build_insights(self, appid: int, prediction: Dict[str, Any],
                        features: Dict[str, Any]) -> Dict[str. Any]:
@@ -36,14 +66,14 @@ class InsightService:
         sale_confidence_comment = self._make_confidence_comment(score, horizon, will_discount)
 
         # adding a couple of contextual hints based on features
-        contextual_factors = List[str] = self._extarct_contextual_factors(features)
+        contextual_factors: List[str] = self._extract_contextual_factors(features)
 
         # placeholder for news/extertnal info. will populate later
         news: List[Dict[str, Any]] = []
 
         # openai generated summary (if enabled)
         openai_summary: Optional[str] = None
-        if self.openai_enalbled:
+        if self.openai_enabled:
             try:
                 openai_summary = self._build_openai_summary(
                     appid=appid,
@@ -69,7 +99,7 @@ class InsightService:
 
         return insights
     
-    def _make_confidence_conmment(self, score: float, horizon: str, will_discount: bool) -> str:
+    def _make_confidence_comment(self, score: float, horizon: str, will_discount: bool) -> str:
         """
         This function creates a friendly comment based on the prediction score.
         """
@@ -85,7 +115,7 @@ class InsightService:
         # score < 0.45
         return f"Unlikely to see a discount within the next {horizon} based on current signals."
     
-    def _extarct_contextual_factors(self, features: Dict[str, Any]) -> List[str]:
+    def _extract_contextual_factors(self, features: Dict[str, Any]) -> List[str]:
         """ 
         This function extracts contextual factors from input features
         that may have influenced the prediction.
@@ -134,18 +164,66 @@ class InsightService:
                               will_discount: bool, contextual_factors: List[str],
                               news: List[Dict[str, Any]]) -> str:
         """
-        Placeholder for future OpenAI integration.
+        This function calls OpenAI to generate a short, user-friendly summary.
 
-        Here we would:
-        - Construct a prompt using prediction + context + news
-        - Call OpenAI's API
-        - Return a short, clear summary string
-
-        For now, we just return a static message so nothing breaks.
+        It takes the model output, contextual factors, and any relevant news to produce
+        a concise explanation suitable for end-users.
         """
-        return (
-            "AI summary is not enabled yet. "
-            "Once connected, this will provide a short explanation using model signals and recent news."
+
+        if not self._openai_client or not self._openai_model:
+            raise RuntimeError("OpenAI client is not properly initialized.")
+        
+        lines: List[str] = []
+
+        lines.append(f"Predicted probability of discount within {horizon}: {score:.2f}.")
+        if will_discount:
+            lines.append("The model suggests it is likely worth waiting for a discount.")
+        else:
+            lines.append("The model suggests a discount is unlikely in this window.")
+
+        if contextual_factors:
+            lines.append("Key factors:")
+            for f in contextual_factors[:3]: # limiting to top 3 factors
+                lines.append(f"- {f}")
+
+        if news:
+            lines.append("Recent news mentions:")
+            for item in news[:3]:
+                title = item.get("title", "")
+                source = item.get("source", "")
+                if title:
+                    if source:
+                        lines.append(f"- '{title}' from {source}")
+                    else:
+                        lines.append(f"- '{title}'")
+
+        context_text = "\n".join(lines)
+
+        prompt = (
+            "You are a helpful assistant for a Steam sale prediction tool.\n"
+            "Using the context below, write 1-2 short sentences to help a user decide "
+            "whether to wait for a discount or buy now.\n"
+            "Be factual, cautious, and do not promise anything.\n"
+            "Context:\n"
+            f"{context_text}\n"
+            "Answer:"
         )
+
+        # calling the OpenAI response/chat api via the official client
+        # using a simple text style.
+        response = self._openai_client.responses.create(
+            model=self._openai_model,
+            input=prompt,
+            max_output_tokens=120,
+        )
+
+        try:
+            output = response.output[0].content[0].text
+            summary = output.strip()
+        except Exception:
+            summary = ""
+
+        return summary
+
     
-insight_service = InsightService()
+insight_service = InsightService(openai_enabled=True)
