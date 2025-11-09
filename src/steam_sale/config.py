@@ -5,7 +5,7 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str | None = None
     OPENAI_MODEL: str = "gpt-4.1-mini"
     ITAD_API_KEY: str | None = None
-    ITAD_BASE_URL: str = "https://api.isthereanydeal.com/games/info/v2"
+    ITAD_BASE_URL: str = "https://api.isthereanydeal.com"
     RAWG_API_KEY: str | None = None
     MODEL_30D_PATH: str
     MODEL_60D_PATH: str

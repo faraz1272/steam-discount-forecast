@@ -13,6 +13,138 @@ try:
 except Exception:
     OpenAI = None # OpenAI is optional and may not be installed
 
+
+class NewsClient:
+    """
+    A small wrapper around NewsAPI to fetch news articles about a game.
+    """
+
+    def __init__(self, api_key:str | None, base_url: str) -> None:
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+
+    def _is_relevant_article(self, title: str, game_name: str) -> bool:
+        """
+        Very small heuristic filter to keep only relevant headlines.
+
+        Rules:
+        - If title contains the game name (case-insensitive), good.
+        - Or if title mentions sale/discount/deal/bundle/promo, we consider it.       
+        """
+
+        if not title:
+            return False
+        
+        title_lower = title.lower()
+        game_lower = (game_name or "").lower().strip()
+
+        # if the game is known, checking if it's in the title
+        if game_lower and game_lower in title_lower:
+            return True
+        
+        # checking for sale/discount keywords
+        sale_keywords = [
+            "steam sale",
+            "sale",
+            "discount",
+            "deal",
+            "bundle",
+            "promo",
+            "promotion",
+            "off",
+            "% off",
+            "price cut",
+            "price drop",
+            "clearance",
+            "flash sale",
+            "limited time",
+            "special offer",
+            "holiday sale",
+            "black friday",
+        ]
+
+        if any(word in title_lower for word in sale_keywords):
+            return True
+        
+        return False
+
+    def is_enabled(self) -> bool:
+        """Check if the NewsAPI client is properly configured."""
+
+        if self.api_key:
+            return True
+        return False
+    
+    def fetch_game_news(self, game_name: str, limit: int = 3) -> list[dict]:
+        """
+        Fetches up to a limit recent articles abobut this game + any discount or sales.
+        Returns a list of relevant articles with title, source and url.
+        If anything fails, returns an empty list.
+        """
+
+        if not self.is_enabled():
+            return []
+        
+        # building a query: game name + sale/discount hints
+        query = f"{game_name} Steam sale OR discount OR deal"
+
+        params = {
+            "q": query,
+            "language": "en",
+            "sortBy": "publishedAt",
+            "pageSize": limit,
+        }
+
+        headers = {"X-Api-Key": self.api_key}
+
+        try:
+            url = f"{self.base_url}/everything"
+            resp = requests.get(url, params=params, headers=headers, timeout=3.0)
+            if resp.status_code != 200:
+                msg = resp.text[:200].replace("\n", " ")
+                logger.warning(
+                    "newsapi_fetch_failed_non_200",
+                    extra={
+                        "status_code": resp.status_code,
+                        "body_snippet": msg,
+                    },
+                )
+                return []
+            
+            data = resp.json()
+            articles = data.get("articles", [])
+
+            results: list[dict] = []
+
+            for article in articles[:limit]:
+                title = article.get("title")
+                source = (article.get("source") or {}).get("name")
+                url = article.get("url")
+
+                if not title:
+                    continue
+
+                # running relevance filter
+                if not self._is_relevant_article(title=title, game_name=game_name):
+                    continue
+
+                item = {
+                    "title": title,
+                    "source": source,
+                    "url": url,
+                }
+                results.append(item)
+
+            return results
+        
+        except Exception as e:
+            logger.warning(
+                "newsapi_fetch_failed_exception",
+                extra={"error": str(e)},
+            )
+            return []
+
+
 @dataclass
 class InsightService:
     """
@@ -23,6 +155,7 @@ class InsightService:
     openai_enabled: bool = False
     _openai_client: Any | None = None
     _openai_model: str | None = None
+    news_client: NewsClient | None = None
 
     def __post_init__(self):
         """
@@ -44,8 +177,20 @@ class InsightService:
         else:
             self.openai_enabled = False
 
+        news_api_key = settings.NEWS_API_KEY
+        news_base_url = settings.NEWS_API_BASE_URL
+        self.news_client = NewsClient(api_key=news_api_key, base_url=news_base_url)
+
+        if self.news_client.is_enabled():
+            logger.info(
+                "newsapi_enabled",
+                extra={"base_url": news_base_url},
+            )
+        else:
+            logger.info("newsapi_disabled")
+
     def build_insights(self, appid: int, prediction: Dict[str, Any],
-                       features: Dict[str, Any]) -> Dict[str. Any]:
+                       features: Dict[str, Any], game_name: Optional[str] = None) -> Dict[str, Any]:
         """
         This fuction builds insights based on the prediction results and input features.
 
@@ -68,8 +213,18 @@ class InsightService:
         # adding a couple of contextual hints based on features
         contextual_factors: List[str] = self._extract_contextual_factors(features)
 
-        # placeholder for news/extertnal info. will populate later
+        # fetching related game news
         news: List[Dict[str, Any]] = []
+        if game_name and self.news_client and self.news_client.is_enabled():
+            logger.info(
+                "newsapi_fetch_start",
+                extra={"appid": appid, "game_name": game_name},
+            )
+            news = self.news_client.fetch_game_news(game_name, limit=3)
+            logger.info(
+                "newsapi_fetch_done",
+                extra={"appid": appid, "game_name": game_name, "count": len(news)},
+            )
 
         # openai generated summary (if enabled)
         openai_summary: Optional[str] = None
@@ -116,47 +271,97 @@ class InsightService:
         return f"Unlikely to see a discount within the next {horizon} based on current signals."
     
     def _extract_contextual_factors(self, features: Dict[str, Any]) -> List[str]:
-        """ 
-        This function extracts contextual factors from input features
-        that may have influenced the prediction.
         """
+        Build simple, human-readable bullet points based on feature values.
 
+        This version assumes the tool is mainly used for upcoming or newly
+        released titles. The messages are about early discount behavior
+        (launch window), not long-term catalog behavior.
+        """
         factors: List[str] = []
 
-        # Example 1: release year hint
+        # 1) New / upcoming title hint (based on release_year)
         release_year = features.get("release_year")
         if release_year is not None:
             try:
                 year_int = int(release_year)
+                # You can tune this to the current year; keeping it generic here.
                 if year_int >= 2024:
-                    factors.append("Recently released title; early deep discounts are less common.")
-                elif year_int <= 2018:
-                    factors.append("Older title; more likely to appear in recurring sale events.")
+                    factors.append(
+                        "This is a new or upcoming title; deep discounts right at or shortly after release are less common."
+                    )
             except (TypeError, ValueError):
-                # If we can't parse, we simply skip this factor.
+                # If parsing fails, we just skip this hint.
                 pass
 
-        # Example 2: publisher size
-        publisher_size_log = features.get("publisher_size_log")
-        if publisher_size_log is not None:
+        # 2) Publisher size (using your one-hot bins if present)
+        # These give us a feel for pricing behavior at launch.
+        try:
+            if features.get("publisher_size_bin__Major (>50)") == 1:
+                factors.append(
+                    "Published by a major publisher; they rarely offer big launch discounts, "
+                    "but frequently participate in major Steam sale events."
+                )
+            elif features.get("publisher_size_bin__Large (16–50)") == 1:
+                factors.append(
+                    "Published by a large publisher; launch discounts are possible but usually modest."
+                )
+            elif features.get("publisher_size_bin__Medium (6–15)") == 1:
+                factors.append(
+                    "Published by a mid-sized publisher; they sometimes use launch-window promos to boost visibility."
+                )
+            elif features.get("publisher_size_bin__Small (≤5)") == 1:
+                factors.append(
+                    "Published by a smaller publisher; they may be more flexible with early discounts to attract players."
+                )
+        except Exception:
+            # Any weirdness with types, we just skip publisher hints.
+            pass
+
+        # 3) Early Access flag
+        early_access = features.get("early_access")
+        if early_access is not None:
             try:
-                size_val = float(publisher_size_log)
-                if size_val >= 3.0:
-                    factors.append("Published by a large publisher; they often join major seasonal sales.")
-                elif size_val <= 1.5:
-                    factors.append("Smaller publisher; discount patterns may be less predictable.")
+                if int(early_access) == 1:
+                    factors.append(
+                        "Launching in Early Access; pricing and discounts can be more experimental early on."
+                    )
             except (TypeError, ValueError):
                 pass
 
-        # Example 3: franchise activity
+        # 4) Franchise activity: more previous titles -> more bundle/promo options
         franchise_count_prev = features.get("franchise_count_prev")
         if franchise_count_prev is not None:
             try:
                 fcount = int(franchise_count_prev)
                 if fcount >= 3:
-                    factors.append("Part of an active franchise; bundles or franchise-wide discounts are common.")
+                    factors.append(
+                        "Part of an established franchise; launch or early bundles and promo discounts are more common."
+                    )
             except (TypeError, ValueError):
                 pass
+
+        # 5) Proximity to major Steam sale windows
+        # If the release timing aligns with a big sale, mention it as a factor.
+        try:
+            near_major_sale = False
+
+            if int(features.get("is_summer_sale_window", 0)) == 1:
+                near_major_sale = True
+            if int(features.get("is_autumn_sale_window", 0)) == 1:
+                near_major_sale = True
+            if int(features.get("is_holiday_season", 0)) == 1:
+                near_major_sale = True
+            if int(features.get("within_7d_of_steam_sale", 0)) == 1:
+                near_major_sale = True
+
+            if near_major_sale:
+                factors.append(
+                    "Release is close to a major Steam sale window, which can increase the chance of early promotional pricing."
+                )
+        except (TypeError, ValueError):
+            # If any of these flags are weird, we just ignore this block.
+            pass
 
         return factors
     
@@ -226,4 +431,4 @@ class InsightService:
         return summary
 
     
-insight_service = InsightService(openai_enabled=True)
+insight_service = InsightService(openai_enabled=False)

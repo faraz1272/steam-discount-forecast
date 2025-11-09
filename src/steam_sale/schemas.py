@@ -20,6 +20,11 @@ class PredictRequest(BaseModel):
     # Optional threshold for classification
     threshold: Optional[float] = Field(None, ge=0, le=1, description="Optional probability cutoff override (0 to 1)")
 
+    game_name: Optional[str] = Field(
+        None,
+        description="Optional game name used to fetch related news/insights."
+    )
+
     @field_validator("features")
     @classmethod
     def ensure_no_empty_features(cls, value: Dict[str, Any]) -> Dict[str, Any]:
@@ -53,3 +58,47 @@ class HealthResponse(BaseModel):
     status: Literal["ok"]
     model_30d_loaded: bool
     model_60d_loaded: bool
+
+class UpcomingGame(BaseModel):
+    """
+    Shape of a single upcoming game card for the frontend.
+    Combines:
+    - static info (name, image, release_date)
+    - model output
+    - insights
+    """
+    appid: int
+    name: str
+    release_date: str
+    image_url: str
+
+    horizon: Literal["30d", "60d"]
+    will_discount: bool
+    score: float
+    threshold: float
+
+    insights: Optional[Dict[str, Any]] = None
+
+class GameSearchResult(BaseModel):
+    appid: Optional[int] = None
+    name: str
+    release_date: Optional[str] = None
+
+
+class PredictFromItadRequest(BaseModel):
+    itad_id: str = Field(..., description="Steam appid of the selected game")
+    horizon: Literal["30d", "60d"] = Field(..., description="Prediction horizon")
+    threshold: Optional[float] = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description="Optional probability cutoff override (0..1)",
+    )
+    include_insights: bool = True
+
+class PredictFromItadResponse(PredictResponse):
+    """
+    Same as PredictResponse, plus optional basic game info.
+    """
+    name: Optional[str] = None
+    image_url: Optional[str] = None
