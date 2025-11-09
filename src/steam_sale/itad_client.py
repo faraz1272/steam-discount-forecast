@@ -176,7 +176,16 @@ class ItadClient:
         shops: set[str] = set()
         for deal in deals:
             shop = deal.get("shop")
-            if shop:
+            if not shop:
+                continue
+
+            # If API returns {"id": "...", "name": "..."} or similar
+            if isinstance(shop, dict):
+                shop_name = shop.get("name") or shop.get("id")
+                if shop_name:
+                    shops.add(str(shop_name))
+            # If it's already a string like "Steam"
+            elif isinstance(shop, str):
                 shops.add(shop)
 
         return list(shops)
