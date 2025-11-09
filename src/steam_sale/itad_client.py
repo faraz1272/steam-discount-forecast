@@ -60,6 +60,44 @@ class ItadClient:
             )
             return None
         
+    def _post(self, path: str, json_body: Any, params: Dict[str, Any]) -> Optional[Any]:
+        """
+        Internal POST helper.
+        Adds ?key=... and handles errors safely.
+        Returns parsed JSON (list or dict) or None on error.
+        """
+        if not self.is_enabled():
+            return None
+
+        url = f"{self.base_url}{path}"
+
+        all_params = {"key": self.api_key}
+        all_params.update(params)
+
+        try:
+            resp = requests.post(url, params=all_params, json=json_body, timeout=5.0)
+
+            if resp.status_code != 200:
+                logger.warning(
+                    "itad_post_non_200",
+                    extra={
+                        "path": path,
+                        "status_code": resp.status_code,
+                        "body_snippet": resp.text[:200].replace("\n", " "),
+                    },
+                )
+                return None
+
+            return resp.json()
+
+        except Exception as e:
+            logger.warning(
+                "itad_post_failed",
+                extra={"path": path, "error": str(e)},
+            )
+            return None
+
+
     def search_game(self, title: str, limit: int = 5) -> List[Dict[str, Any]]:
         """
         Searches for games matching the query string.
@@ -112,6 +150,36 @@ class ItadClient:
             return None
         
         return data
+    
+    def get_game_shops(self, itad_id: str) -> list[str]:
+        """
+        Gets list of shop names (e.g. Steam, GOG, Epic) where this game appears.
+        Uses:
+          POST /games/prices/v3
+        Ignores prices, only care about which shops exist.
+        """
+        if not self.is_enabled():
+            return []
+
+        data = self._post(
+            path="/games/prices/v3",
+            json_body=[itad_id],          # API expects a list of game IDs
+            params={},
+        )
+
+        if not data or not isinstance(data, list):
+            return []
+
+        entry = data[0] if data else {}
+        deals = entry.get("deals") or []
+
+        shops: set[str] = set()
+        for deal in deals:
+            shop = deal.get("shop")
+            if shop:
+                shops.add(shop)
+
+        return list(shops)
     
 itad_client = ItadClient(
     api_key=settings.ITAD_API_KEY,
