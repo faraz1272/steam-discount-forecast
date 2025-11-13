@@ -32,6 +32,8 @@ That idea turned into **WaitForIt** - a machine-learning powered companion that 
 
 - **Live Service:** https://waitforit-service-417869241340.europe-west2.run.app
 
+
+> **Note:** This project is an ongoing effort and will be updated frequently as new features, improvements, and models are added.
 ---
 
 ## 🚀 **What WaitForIt Does**
