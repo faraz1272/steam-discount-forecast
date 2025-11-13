@@ -52,6 +52,26 @@ def _pick_itad_candidate(name: str, results: List[Dict[str, Any]]) -> Optional[D
         
     return results[0]
 
+def _extract_image_url_from_itad(game_info: dict, appid: int | None) -> str | None:
+    # If ITAD info is missing or malformed, go straight to fallback
+    if not isinstance(game_info, dict):
+        if appid:
+            return f"https://steamcdn-a.akamaihd.net/steam/apps/{appid}/header.jpg"
+        return None
+
+    assets = game_info.get("assets") or {}
+
+    # Prefer bigger/better assets if present
+    for key in ["boxart", "banner600", "banner400", "banner300", "banner145"]:
+        url = assets.get(key)
+        if isinstance(url, str) and url.strip():
+            return url.strip()
+
+    # Fallback: Steam header if appid looks valid
+    if appid:
+        return f"https://steamcdn-a.akamaihd.net/steam/apps/{appid}/header.jpg"
+
+    return None
 
 def build_upcoming_predictions() -> None:
     logger.info("upcoming_precompute_started", extra={"seed_path": SEED_PATH})
@@ -114,7 +134,7 @@ def build_upcoming_predictions() -> None:
                 if itad_release:
                     release_date = itad_release  # override CSV
 
-                # ITAD price if available (you may need to adapt based on actual field)
+                # ITAD price if available 
                 itad_price = itad_info.get("price")
                 if isinstance(itad_price, (int, float)):
                     price = float(itad_price)
@@ -167,12 +187,20 @@ def build_upcoming_predictions() -> None:
 
             # making prediction for 30d horizon
             try:
-                pred = model_service.predict(
+                pred_30 = model_service.predict(
+                    horizon="30d",
+                    appid=appid,
+                    features=features,
+                    threshold=None,
+                )
+
+                pred_60 = model_service.predict(
                     horizon="60d",
                     appid=appid,
                     features=features,
                     threshold=None,
                 )
+
             except Exception as e:
                 logger.warning(
                     "upcoming_games_prediction_failed",
@@ -180,13 +208,14 @@ def build_upcoming_predictions() -> None:
                 )
                 continue
 
-            # generating insights
+            # generating combined insights for upcoming games
             try:
-                insights = insight_service.build_insights(
+                insights = insight_service.build_combined_insights(
                     appid=appid,
-                    predictions=pred,
-                    features=features,
                     game_name=name,
+                    pred_30=pred_30,
+                    pred_60=pred_60,
+                    features=features,
                 )
             except Exception as e:
                 logger.warning(
@@ -195,24 +224,29 @@ def build_upcoming_predictions() -> None:
                 )
                 insights = None
 
-            # image url construction
-            image_url = (
-                f"https://steamcdn-a.akamaihd.net/steam/apps/{appid}/header.jpg"
-                if appid
-                else None
-            )
+            # image url 
+            image_url = _extract_image_url_from_itad(itad_info, appid)
 
             record = {
                 "appid": appid,
                 "name": name,
                 "release_date": release_date,
                 "price": price,
-                "horizon": pred["horizon"],
-                "will_discount": pred["will_discount"],
-                "score": pred["score"],
-                "threshold": pred["threshold"],
-                "insights": insights,
                 "image_url": image_url,
+                # keep legacy top-levels mapped from 30d for now
+                "horizon": "30d",
+                "will_discount": pred_30["will_discount"],
+                "score": pred_30["score"],
+                "threshold": pred_30["threshold"],
+                # explicit multi-horizon
+                "score_30d": pred_30["score"],
+                "will_discount_30d": pred_30["will_discount"],
+                "threshold_30d": pred_30["threshold"],
+                "score_60d": pred_60["score"],
+                "will_discount_60d": pred_60["will_discount"],
+                "threshold_60d": pred_60["threshold"],
+                # unified insights (bullets + news)
+                "insights": insights,
             }
             records.append(record)
 

@@ -1,0 +1,752 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>{{ app_name }} - Upcoming Steam Discounts</title>
+    <!-- Tailwind via CDN: easy styling, no build step -->
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+
+    <!-- Top bar -->
+    <header class="border-b border-slate-800 px-6 py-4 flex items-center justify-between">
+        <div class="flex items-baseline gap-2">
+            <h1 class="text-2xl font-semibold tracking-tight">WaitForIt.</h1>
+            <span class="text-xs uppercase tracking-wide text-slate-400">
+                Steam Discount Forecasts
+            </span>
+        </div>
+        <div class="text-xs text-slate-400">
+            Experimental predictions for upcoming PC games.
+        </div>
+    </header>
+
+    <main class="px-6 py-6 max-w-7xl mx-auto">
+        <!-- Intro Banner -->
+        <!-- Hero banner -->
+        <section class="max-w-3xl mx-auto pt-10 pb-6 text-center">
+            <h1 class="text-3xl sm:text-4xl md:text-5xl font-bold tracking-tight text-sky-300">
+                <span class="text-white">WaitForIt.</span> Don’t Buy Too Soon!
+            </h1>
+        
+            <p class="mt-4 text-slate-300 text-[13px] sm:text-sm leading-relaxed">
+            We predict whether a newly released Steam game is likely to go on sale within
+            <span class="font-semibold text-sky-200">30 or 60 days</span> of launch, 
+            helping you decide if it’s smarter to wait, save money, and skip buyer’s remorse.
+            </p>
+            <div class="mt-4 rounded-xl bg-slate-800/50 border border-slate-700/50 text-[11px] text-slate-400 text-center py-2">
+                <span>Data and insights powered by </span>
+                <a href="https://isthereanydeal.com/" target="_blank" class="text-sky-400 hover:underline">IsThereAnyDeal</a>
+                <span> (real-time Steam price tracking)</span>
+                <span class="mx-1">·</span>
+                <span class="text-emerald-400">OpenAI</span>
+                <span> (AI reasoning & prediction explanations)</span>
+            </div>
+        
+            <!-- Compact info note -->
+            <div class="mt-5 inline-flex items-start gap-2 text-left bg-amber-500/10 border border-amber-600/30
+                        rounded-xl px-3.5 py-2.5 text-amber-200 text-[12px] sm:text-[13px]">
+            <span class="mt-[2px]">ℹ️</span>
+            <p>
+                “30 days” and “60 days” refer to the number of days
+                <span class="font-semibold">after a game’s release date</span>.
+                Predictions help you decide whether it’s smarter to wait, so you can avoid paying full
+                price if a launch-window discount is likely.
+            </p>
+            </div>
+        </section>
+  
+        <!-- Divider -->
+        <hr class="max-w-screen-xl mx-auto border-slate-800/50 my-6" />
+
+        <!-- Search any game -->
+        <section class="mb-4 flex flex-col md:flex-row items-stretch md:items-center gap-3">
+            <div class="flex-1">
+                <label class="block text-[10px] text-slate-400 mb-1">
+                    Check any game (via ITAD + model)
+                </label>
+                <div class="flex gap-2 relative">
+                    <!-- Search input -->
+                    <input
+                    id="search-input"
+                    type="text"
+                    placeholder="Try an upcoming game (e.g., Resident Evil Requiem)"
+                    class="flex-1 px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs
+                            text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                    autocomplete="off"
+                    aria-autocomplete="list"
+                    aria-controls="search-suggestions"
+                    aria-expanded="false"
+                    />
+                
+                    <!-- Predict button -->
+                    <button
+                    type="button"
+                    onclick="runSearch()"
+                    class="px-3 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-[10px] font-semibold text-white transition"
+                    >
+                    Predict
+                    </button>
+                
+                    <!-- Suggestions dropdown -->
+                    <div
+                    id="search-suggestions"
+                    class="absolute left-0 right-[4.5rem] top-[100%] mt-1 hidden z-50
+                            rounded-xl border border-slate-700 bg-slate-900/95 shadow-xl
+                            text-[12px] overflow-hidden"
+                    role="listbox"
+                    ></div>
+                </div>
+                <p class="text-[9px] text-slate-500 mt-1">
+                    Uses live ITAD lookup + our trained model. Results appear below.
+                </p>
+            </div>
+        </section>
+
+        <!-- Container for dynamic search result card -->
+        <div id="search-result" class="mb-4 relative hidden"></div>
+        <!-- Layout: left = list, right = cards -->
+        <div class="grid grid-cols-12 gap-6">
+
+            <!-- Left: list of game names -->
+            <aside class="col-span-3 border border-slate-800 rounded-xl p-3 bg-slate-900/40">
+                <h2 class="text-sm font-semibold mb-2 text-slate-300">
+                    Upcoming games
+                </h2>
+                {% if games %}
+                    <ul class="space-y-1 text-sm max-h-[70vh] overflow-y-auto pr-1">
+                        {% for g in games %}
+                            <li
+                                class="px-2 py-1.5 rounded-lg hover:bg-slate-800 cursor-pointer flex items-center gap-2"
+                            >
+                                <span class="w-1.5 h-1.5 rounded-full
+                                    {% if g.will_discount %}
+                                        bg-emerald-400
+                                    {% else %}
+                                        bg-slate-500
+                                    {% endif %}
+                                "></span>
+                                <span class="truncate">
+                                    {{ g.name }}
+                                </span>
+                            </li>
+                        {% endfor %}
+                    </ul>
+                {% else %}
+                    <p class="text-xs text-slate-500">
+                        No upcoming predictions found. Run the precompute script first.
+                    </p>
+                {% endif %}
+            </aside>
+
+            <!-- Right: cards grid -->
+
+            <section class="col-span-9">
+                <header class="mb-4 ml-4 flex flex-wrap items-baseline gap-2 md:ml-6">
+                    <h2 class="text-lg font-semibold text-slate-100">
+                      Upcoming Titles | 30 & 60-Day Discount Predictions
+                    </h2>
+                    <span class="text-[11px] text-slate-400">(Updated weekly from live ITAD data)</span>
+                  </header>
+                <hr class="border-slate-800/70" />
+                {% if games %}
+                    <div class="columns-1 md:columns-2 xl:columns-3 gap-6 [column-fill:_balance]">
+                        {% for g in games %}
+                        <article
+                        data-game-id="{{ loop.index0 }}"
+                        class="game-card break-inside-avoid inline-block w-full mb-6
+                                border border-slate-800 rounded-2xl bg-slate-900/40 overflow-hidden">
+                    
+                        <!-- Image -->
+                        {% if g.image_url %}
+                            <img
+                            src="{{ g.image_url }}"
+                            alt="{{ g.name }}"
+                            class="w-full h-40 object-cover"
+                            loading="lazy"
+                            onerror="this.style.display='none';"
+                            />
+                        {% endif %}
+                    
+                        <div class="p-4 flex flex-col gap-2">
+                            <!-- Title & meta -->
+                            <div>
+                            <h3 class="text-sm font-semibold leading-snug">
+                                {{ g.name }}
+                            </h3>
+                            <p class="text-[10px] text-slate-400 mt-1">
+                                Release: {{ g.release_date or "TBA" }} ·
+                                Price: ${{ g.price if g.price is not none else "TBA" }}
+                            </p>
+                            </div>
+                    
+                            <!-- Prediction summary -->
+                            <div class="mt-1 space-y-1">
+                            {% set prob_30 = ((g.score_30d if g.score_30d is defined else g.score) * 100) | round(1) %}
+                            {% set prob_60 = (g.score_60d * 100) | round(1) if g.score_60d is defined else None %}
+                    
+                            <!-- 30-day -->
+                            <div>
+                                <p class="text-[10px] text-slate-300">
+                                Next 30 days:
+                                <span class="font-semibold">{{ prob_30 }}%</span>
+                                </p>
+                                <div class="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                                <div class="h-1.5 rounded-full" style="width: {{ prob_30 }}%; background: linear-gradient(to right,#38bdf8,#22c55e);"></div>
+                                </div>
+                            </div>
+                    
+                            <!-- 60-day -->
+                            <div>
+                                <p class="text-[10px] text-slate-300">
+                                Next 60 days:
+                                <span class="font-semibold">
+                                    {% if prob_60 is not none %}
+                                    {{ prob_60 }}%
+                                    {% else %}
+                                    Coming soon
+                                    {% endif %}
+                                </span>
+                                </p>
+                                <div class="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                                {% if prob_60 is not none %}
+                                    <div class="h-1.5 rounded-full" style="width: {{ prob_60 }}%; background: linear-gradient(to right,#38bdf8,#22c55e);"></div>
+                                {% endif %}
+                                </div>
+                            </div>
+                    
+                            <!-- Hint -->
+                            {% if g.will_discount %}
+                                <span class="inline-flex mt-1 px-2 py-0.5 rounded-full text-[9px]
+                                            bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
+                                Model hint: Worth waiting
+                                </span>
+                            {% else %}
+                                <span class="inline-flex mt-1 px-2 py-0.5 rounded-full text-[9px]
+                                            bg-sky-500/10 text-sky-400 border border-sky-500/30">
+                                Model hint: Safe to buy at launch
+                                </span>
+                            {% endif %}
+                            </div>
+                    
+                            <!-- Insights toggle -->
+                            <div class="mt-auto pt-2">
+                            <button
+                                type="button"
+                                class="w-full text-[10px] px-3 py-1.5 rounded-lg border border-slate-700
+                                    hover:border-sky-500 hover:bg-slate-900 transition flex items-center justify-between"
+                                data-insights-btn
+                                data-target="ins-{{ loop.index0 }}">
+                                <span>View insights (news &amp; AI reasoning)</span>
+                                <span class="text-[8px] text-slate-500" aria-hidden="true">▸</span>
+                            </button>
+                            </div>
+                    
+                            <div
+                            id="ins-{{ loop.index0 }}"
+                            data-insights
+                            class="hidden mt-2 px-3 py-2 text-[9px] text-slate-300 space-y-1
+                                    border border-slate-800 rounded-xl bg-slate-950/90">
+                            {% if g.insights %}
+                                {% if g.insights.sale_confidence_comment %}
+                                <p class="text-sky-300">
+                                    {{ g.insights.sale_confidence_comment }}
+                                </p>
+                                {% endif %}
+                    
+                                {# prefer AI-written bullets; fall back to contextual_factors if needed #}
+                                {% set bullet_list = (g.insights.bullets if g.insights and g.insights.bullets) 
+                                                    or (g.insights.contextual_factors if g.insights else []) %}
+                                {% if bullet_list %}
+                                <ul class="list-disc list-inside space-y-0.5">
+                                    {% for line in bullet_list %}
+                                    <li>{{ line }}</li>
+                                    {% endfor %}
+                                </ul>
+                                {% endif %}
+                    
+                                {% if g.insights.news %}
+                                <p class="mt-1 text-slate-400">Recent related news:</p>
+                                <ul class="list-disc list-inside space-y-0.5">
+                                    {% for n in g.insights.news[:3] %}
+                                    <li>
+                                        <a href="{{ n.url }}" target="_blank" class="text-sky-400 hover:underline">
+                                        {{ n.title }}
+                                        </a>
+                                        <span class="text-slate-500"> · {{ n.source }}</span>
+                                    </li>
+                                    {% endfor %}
+                                </ul>
+                                {% endif %}
+                    
+                                {% if g.insights.openai_summary %}
+                                <p class="mt-1 text-emerald-300">
+                                    {{ g.insights.openai_summary }}
+                                </p>
+                                {% endif %}
+                            {% else %}
+                                <p class="text-slate-500">
+                                Detailed insights are not available for this game yet.
+                                </p>
+                            {% endif %}
+                            </div>
+                        </div>
+                        </article>
+                        {% endfor %}
+                    </div>
+                    <script>
+                        document.addEventListener('click', function (e) {
+                          const btn = e.target.closest('[data-insights-btn]');
+                          if (!btn) return;
+                      
+                          const id = btn.getAttribute('data-target');
+                          const panel = document.getElementById(id);
+                          if (!panel) return;
+                      
+                          panel.classList.toggle('hidden');
+                      
+                          const caret = btn.querySelector('span[aria-hidden="true"]');
+                          if (caret) caret.textContent = panel.classList.contains('hidden') ? '▸' : '▾';
+                        });
+                      </script>
+                {% else %}
+                    <p class="text-sm text-slate-400">
+                        No games to display yet. Make sure
+                        <code class="text-sky-400 text-xs">artifacts/upcoming_predictions.json</code>
+                        exists and is populated.
+                    </p>
+                {% endif %}
+            </section>
+        </div>
+    </main>
+    <script>
+        function closeSearchResult() {
+          const container = document.getElementById('search-result');
+          if (!container) return;
+          container.style.transition = "opacity 0.3s ease";
+          container.style.opacity = "0";
+          setTimeout(() => {
+            container.innerHTML = "";  // remove card
+            container.style.opacity = "1"; // reset for next
+            container.classList.add("hidden");
+          }, 300);
+        }
+    </script>
+    <script>
+        let selectedGameId = null;
+    
+        function toggleInsights(cardId) {
+            const cards = document.querySelectorAll(".game-card");
+    
+            if (selectedGameId === cardId) {
+                // Clicking the same card -> clear selection
+                selectedGameId = null;
+            } else {
+                selectedGameId = cardId;
+            }
+    
+            cards.forEach((card) => {
+                const id = card.getAttribute("data-game-id");
+                const insights = card.querySelector("[data-insights]");
+    
+                if (!insights) return;
+    
+                if (selectedGameId === null) {
+                    // No selection: reset all
+                    insights.classList.add("hidden");
+                    card.classList.remove(
+                        "opacity-30",
+                        "ring-2",
+                        "ring-sky-500",
+                        "bg-slate-900"
+                    );
+                } else if (id === selectedGameId) {
+                    // Focused card
+                    insights.classList.remove("hidden");
+                    card.classList.add(
+                        "ring-2",
+                        "ring-sky-500",
+                        "bg-slate-900"
+                    );
+                    card.classList.remove("opacity-30");
+                } else {
+                    // Non-focused cards: dim
+                    insights.classList.add("hidden");
+                    card.classList.add("opacity-30");
+                    card.classList.remove("ring-2", "ring-sky-500", "bg-slate-900");
+                }
+            });
+        }
+    </script>
+    <script>
+        async function runSearch() {
+            const input = document.getElementById("search-input");
+            const container = document.getElementById("search-result");
+            const title = (input.value || "").trim();
+
+            if (!title) {
+                container.innerHTML = `
+                    <p class="text-[10px] text-rose-400">
+                        Please enter a game title.
+                    </p>`;
+                return;
+            }
+
+            container.innerHTML = `
+                <p class="text-[10px] text-slate-400">
+                    Loading prediction for "<span class="text-sky-400">${escapeHtml(title)}</span>"...
+                </p>`;
+
+            try {
+                const q = encodeURIComponent(title);
+                const res = await fetch(`/predict/search?title=${q}`);
+
+                const data = await res.json();
+
+                if (!res.ok) {
+                    const msg = data && data.detail ? data.detail : "Could not fetch prediction.";
+                    container.innerHTML = `
+                        <p class="text-[10px] text-rose-400">
+                            ${escapeHtml(msg)}
+                        </p>`;
+                    return;
+                }
+
+                // ---- unpack backend result (GameSearchResult) ----
+                const name = data.name || title;
+                const releaseDate = data.release_date || "TBA";
+                const price = (data.price !== null && data.price !== undefined)
+                    ? `$${Number(data.price).toFixed(2)}`
+                    : "TBA";
+                const imageUrl = data.image_url || "";
+
+                const score30 = typeof data.score_30d === "number" ? data.score_30d : null;
+                const score60 = typeof data.score_60d === "number" ? data.score_60d : null;
+
+                const prob30 = score30 !== null ? (score30 * 100) : null;
+                const prob60 = score60 !== null ? (score60 * 100) : null;
+
+                const will30 = !!data.will_discount_30d;
+                const will60 = !!data.will_discount_60d;
+
+                const insightsHtml = renderSearchInsights(name, data);
+
+                // Model hint (simple, uses 30d primarily)
+                let hint;
+                if (prob30 === null) {
+                    hint = "Model hint: Discount forecast not available for this title.";
+                } else if (prob30 < 20) {
+                    hint = "Model hint: Safe to buy at current price.";
+                } else if (prob30 > 60) {
+                    hint = "Model hint: High discount odds soon — waiting can pay off.";
+                } else {
+                    hint = "Model hint: Mixed odds — waiting is reasonable if you’re not in a rush.";
+                }
+
+                const cardHTML = `
+                    <article class="border border-sky-600/40 rounded-2xl bg-slate-900/95 p-4 flex flex-col gap-3">
+                        <div class="grid grid-cols-12 gap-4 items-stretch">
+                            <!-- Column 1: image + meta -->
+                            <div class="col-span-12 sm:col-span-3 flex flex-col items-start gap-2">
+                                ${
+                                    imageUrl
+                                        ? `<img src="${imageUrl}"
+                                                alt="${escapeHtml(name)}"
+                                                class="w-full h-24 object-cover rounded-xl border border-slate-800"
+                                                onerror="this.style.display='none';" />`
+                                        : ""
+                                }
+                                <div class="space-y-0.5 text-[10px] text-slate-300 mt-1">
+                                    <p class="text-[11px] font-semibold text-slate-100">
+                                        ${escapeHtml(name)}
+                                    </p>
+                                    <p>Release:
+                                        <span class="text-sky-300">${escapeHtml(releaseDate)}</span>
+                                    </p>
+                                    <p>Price:
+                                        <span class="text-sky-300">${escapeHtml(price)}</span>
+                                    </p>
+                                    <p class="text-[8px] text-slate-500">
+                                        Live lookup via ITAD &amp; WaitForIt model.
+                                    </p>
+                                </div>
+                            </div>
+
+                            <!-- Column 2: probabilities + hint -->
+                            <div class="col-span-12 sm:col-span-3 flex flex-col gap-2 justify-center">
+                                <div>
+                                    <p class="text-[11px] text-slate-200 mb-0.5">
+                                        Next 30 days:
+                                        <span class="font-semibold">
+                                            ${prob30 !== null ? prob30.toFixed(1) + "%" : "Not available"}
+                                        </span>
+                                    </p>
+                                    ${prob30 !== null ? renderBar(prob30) : renderEmptyBar()}
+                                </div>
+
+                                <div class="mt-1">
+                                    <p class="text-[11px] text-slate-200 mb-0.5">
+                                        Next 60 days:
+                                        <span class="font-semibold">
+                                            ${prob60 !== null ? prob60.toFixed(1) + "%" : "Not available"}
+                                        </span>
+                                    </p>
+                                    ${prob60 !== null ? renderBar(prob60) : renderEmptyBar()}
+                                </div>
+
+                                <div class="mt-1">
+                                    <span class="inline-flex px-2 py-1 rounded-full text-[9px]
+                                                ${will30 || will60
+                                                    ? "bg-emerald-500/10 text-emerald-300 border border-emerald-500/40"
+                                                    : "bg-sky-500/10 text-sky-300 border border-sky-500/40"}">
+                                        ${escapeHtml(hint)}
+                                    </span>
+                                    <p class="text-[8px] text-slate-500 mt-1">
+                                        Not financial advice. Probabilities are model estimates, not guarantees.
+                                    </p>
+                                </div>
+                            </div>
+
+                            <!-- Column 3: insights block -->
+                            <div class="col-span-12 sm:col-span-6">
+                                ${insightsHtml}
+                            </div>
+                        </div>
+                    </article>
+                `;
+                // Add the close button markup
+                const closeBtn = `
+                <button
+                    type="button"
+                    aria-label="Close result"
+                    onclick="closeSearchResult()"
+                    class="absolute top-2 right-2 z-10 rounded-full w-7 h-7 flex items-center justify-center
+                        bg-slate-800/70 hover:bg-slate-800 text-slate-300 hover:text-white
+                        border border-slate-700 shadow"
+                >
+                    &times;
+                </button>
+                `;
+                // Inject both into the container
+                container.classList.remove("hidden");
+                container.classList.add("relative"); // allows absolute positioning for the button
+                container.style.opacity = "1";
+                container.innerHTML = closeBtn + cardHTML;
+            } catch (err) {
+                console.error(err);
+                container.innerHTML = `
+                    <p class="text-[10px] text-rose-400">
+                        Unexpected error while fetching prediction.
+                    </p>`;
+            }
+        }
+
+        function renderBar(prob) {
+            const p = Math.max(0, Math.min(Number(prob) || 0, 100));
+            return `
+                <div class="w-full h-1.5 bg-slate-900 rounded-full overflow-hidden border border-slate-800">
+                    <div class="h-1.5 rounded-full"
+                        style="width: ${p}%;
+                                background: linear-gradient(to right, #38bdf8, #22c55e);">
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderEmptyBar() {
+            return `
+                <div class="w-full h-1.5 bg-slate-900 rounded-full border border-slate-800 opacity-40"></div>
+            `;
+        }
+
+        function renderSearchInsights(name, data) {
+            const ins = data.insights || {};
+            const bullets = Array.isArray(ins.bullets) ? ins.bullets : [];
+            const news = Array.isArray(ins.news) ? ins.news : [];
+            const ai = ins.openai_summary || null;
+
+            let html = `<div class="text-[10px] md:text-[11px] text-slate-200 space-y-1.5">`;
+            html += `<p class="font-semibold text-slate-100">
+                        Model verdict for ${escapeHtml(name)}
+                    </p>`;
+
+            if (bullets.length) {
+                html += `<ul class="list-disc list-inside space-y-0.5">`;
+                for (const b of bullets.slice(0, 4)) {
+                    html += `<li>${escapeHtml(b)}</li>`;
+                }
+                html += `</ul>`;
+            }
+
+            if (ai) {
+                html += `
+                    <p class="mt-1 text-emerald-300">
+                        <span class="mr-1 text-[8px] align-middle">◆</span>
+                        ${escapeHtml(ai)}
+                    </p>`;
+            }
+
+            if (news.length) {
+                html += `<p class="mt-1 text-slate-400">Recent related news:</p>
+                        <ul class="list-disc list-inside space-y-0.5">`;
+                for (const n of news.slice(0, 3)) {
+                    const t = escapeHtml(n.title || "News");
+                    const url = n.url || "#";
+                    const s = escapeHtml(n.source || "");
+                    html += `
+                        <li>
+                            <a href="${url}" target="_blank"
+                            class="text-sky-400 hover:underline">${t}</a>
+                            ${s ? `<span class="text-slate-500"> · ${s}</span>` : ""}
+                        </li>`;
+                }
+                html += `</ul>`;
+            }
+
+            if (!bullets.length && !ai && !news.length) {
+                html += `<p class="text-slate-500">
+                            Detailed insights are not available for this title yet.
+                        </p>`;
+            }
+
+            html += `</div>`;
+            return html;
+        }
+
+        function escapeHtml(str) {
+            return String(str ?? "")
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
+    </script>
+    <script>
+        // --- tiny debounce helper ---
+        function debounce(fn, ms) {
+          let t;
+          return (...args) => {
+            clearTimeout(t);
+            t = setTimeout(() => fn.apply(this, args), ms);
+          };
+        }
+      
+        const inputEl = document.getElementById('search-input');
+        const panelEl = document.getElementById('search-suggestions');
+      
+        let activeIndex = -1;          // keyboard selection index
+        let currentItems = [];         // last results
+      
+        function showPanel() {
+          panelEl.classList.remove('hidden');
+          inputEl.setAttribute('aria-expanded', 'true');
+        }
+      
+        function hidePanel() {
+          panelEl.classList.add('hidden');
+          inputEl.setAttribute('aria-expanded', 'false');
+          activeIndex = -1;
+        }
+      
+        function renderSuggestions(items) {
+          currentItems = items || [];
+          if (!currentItems.length) {
+            hidePanel();
+            panelEl.innerHTML = '';
+            return;
+          }
+      
+          const html = currentItems.map((it, i) => `
+            <button
+              type="button"
+              role="option"
+              data-index="${i}"
+              class="w-full text-left px-3 py-2 hover:bg-slate-800/70 focus:bg-slate-800/70
+                     ${i === activeIndex ? 'bg-slate-800/70' : ''}"
+              onclick="pickSuggestion(${i})"
+            >
+              <span class="text-slate-200">${escapeHtml(it.title || it.name || 'Unknown')}</span>
+            </button>
+          `).join('');
+      
+          panelEl.innerHTML = html;
+          showPanel();
+        }
+      
+        // Escape HTML for safety
+        function escapeHtml(str){
+          return String(str)
+            .replace(/&/g,'&amp;')
+            .replace(/</g,'&lt;')
+            .replace(/>/g,'&gt;')
+            .replace(/"/g,'&quot;')
+            .replace(/'/g,'&#039;');
+        }
+      
+        // Called when a user clicks a suggestion
+        window.pickSuggestion = function(i) {
+          const item = currentItems[i];
+          if (!item) return;
+          inputEl.value = item.title || item.name || '';
+          hidePanel();
+          // Optional: kick off the prediction immediately
+          runSearch();
+        };
+      
+        // Keyboard handling
+        inputEl.addEventListener('keydown', (e) => {
+          if (panelEl.classList.contains('hidden')) return;
+      
+          if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            activeIndex = (activeIndex + 1) % currentItems.length;
+            renderSuggestions(currentItems);
+          } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            activeIndex = (activeIndex - 1 + currentItems.length) % currentItems.length;
+            renderSuggestions(currentItems);
+          } else if (e.key === 'Enter') {
+            if (activeIndex >= 0 && activeIndex < currentItems.length) {
+              e.preventDefault();
+              pickSuggestion(activeIndex);
+            } else {
+              hidePanel(); // just submit what’s typed
+              runSearch();
+            }
+          } else if (e.key === 'Escape') {
+            hidePanel();
+          }
+        });
+      
+        // Hide when clicking outside
+        document.addEventListener('click', (e) => {
+          if (!panelEl.contains(e.target) && e.target !== inputEl) {
+            hidePanel();
+          }
+        });
+      
+        // Debounced input => fetch suggestions
+        const fetchSuggestions = debounce(async () => {
+          const q = (inputEl.value || '').trim();
+          if (q.length < 2) { hidePanel(); return; }
+      
+          try {
+            const resp = await fetch(`/games/search?title=${encodeURIComponent(q)}&limit=8`);
+            const data = await resp.json();
+      
+            if (!resp.ok) {
+              hidePanel();
+              return;
+            }
+            // Expecting [{ itad_id, title }, ...]
+            renderSuggestions(Array.isArray(data) ? data : []);
+          } catch {
+            hidePanel();
+          }
+        }, 200);
+      
+        inputEl.addEventListener('input', fetchSuggestions);
+      </script>
+</body>
+</html>

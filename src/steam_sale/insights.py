@@ -254,6 +254,225 @@ class InsightService:
 
         return insights
     
+    def build_combined_insights(
+    self,
+    appid: int,
+    game_name: str,
+    pred_30: Dict[str, Any],
+    pred_60: Dict[str, Any],
+    features: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Unified insights builder for cases where we have BOTH 30d and 60d predictions.
+
+        This is what we should use for:
+        - title search (live lookup)
+        - precomputed upcoming games
+
+        Returns a consistent structure:
+        {
+        "score_30d": float,
+        "score_60d": float,
+        "will_discount_30d": bool,
+        "will_discount_60d": bool,
+        "contextual_factors": [...],
+        "news": [...],
+        "bullets": ["...", "...", "..."],  # 3 concise recommendation bullets
+        }
+        """
+
+        score_30 = float(pred_30.get("score", 0.0))
+        score_60 = float(pred_60.get("score", 0.0))
+        will_30 = bool(pred_30.get("will_discount", False))
+        will_60 = bool(pred_60.get("will_discount", False))
+
+        # re-use your existing factor extractor
+        contextual_factors = self._extract_contextual_factors(features)
+
+        # shared NewsAPI usage
+        news: List[Dict[str, Any]] = []
+        if self.news_client and self.news_client.is_enabled():
+            try:
+                logger.info(
+                    "newsapi_fetch_start",
+                    extra={"appid": appid, "game_name": game_name},
+                )
+                news = self.news_client.fetch_game_news(game_name, limit=3)
+                logger.info(
+                    "newsapi_fetch_done",
+                    extra={"appid": appid, "game_name": game_name, "count": len(news)},
+                )
+            except Exception as e:
+                logger.warning(
+                    "newsapi_fetch_failed_combined",
+                    extra={"appid": appid, "game_name": game_name, "error": str(e)},
+                )
+                news = []
+
+        # Build 3 bullets either via OpenAI or deterministic fallback
+        bullets: List[str] = []
+        if self.openai_enabled:
+            try:
+                bullets = self._build_openai_summary_combined(
+                    appid=appid,
+                    game_name=game_name,
+                    score_30=score_30,
+                    score_60=score_60,
+                    contextual_factors=contextual_factors,
+                    news=news,
+                )
+            except Exception as e:
+                logger.warning(
+                    "insights_openai_failed_combined",
+                    extra={"appid": appid, "error": str(e)},
+                )
+                bullets = []
+
+        if not bullets:
+            bullets = self._fallback_combined_bullets(
+                score_30=score_30,
+                score_60=score_60,
+                will_30=will_30,
+                will_60=will_60,
+            )
+
+        return {
+            "score_30d": score_30,
+            "score_60d": score_60,
+            "will_discount_30d": will_30,
+            "will_discount_60d": will_60,
+            "contextual_factors": contextual_factors,
+            "news": news,
+            "bullets": bullets,
+        }
+    
+    def _fallback_combined_bullets(
+    self,
+    score_30: float,
+    score_60: float,
+    will_30: bool,
+    will_60: bool,
+    ) -> List[str]:
+        """
+        Fallback: 3 concise bullets based purely on the two probabilities.
+        No fluff, no promises.
+        """
+
+        p30 = score_30 * 100
+        p60 = score_60 * 100
+        bullets: List[str] = []
+
+        # Bullet 1: 30-day view
+        if p30 < 20:
+            bullets.append("Low chance of a discount in the next 30 days.")
+        elif p30 > 60:
+            bullets.append("Strong chance of a discount within the next 30 days.")
+        else:
+            bullets.append("Some chance of a discount in the next 30 days, but not high-confidence.")
+
+        # Bullet 2: 60-day view
+        if p60 < 30:
+            bullets.append("Even over 60 days, a meaningful discount looks unlikely.")
+        elif p60 > 60:
+            bullets.append("Within 60 days, a discount becomes quite plausible based on similar titles.")
+        else:
+            bullets.append("Over 60 days, odds improve somewhat but remain uncertain.")
+
+        # Bullet 3: actionable recommendation
+        if will_30 or will_60:
+            bullets.append(
+                "If you’re price-sensitive and can wait, holding off may be reasonable; otherwise buying near launch is still defensible."
+            )
+        else:
+            bullets.append(
+                "If you want to play soon, buying at or near launch is reasonable; waiting solely for a big discount may not pay off quickly."
+            )
+
+        # Ensure exactly 3
+        return bullets[:3]
+    
+    def _build_openai_summary_combined(
+        self,
+        appid: int,
+        game_name: str,
+        score_30: float,
+        score_60: float,
+        contextual_factors: List[str],
+        news: List[Dict[str, Any]],
+    ) -> List[str]:
+        """
+        OpenAI-backed generator for EXACTLY 3 short bullets for combined 30d + 60d view.
+
+        Returns [] on any failure; caller will fallback.
+        """
+
+        if not self._openai_client or not self._openai_model:
+            return []
+
+        p30 = f"{score_30 * 100:.1f}%"
+        p60 = f"{score_60 * 100:.1f}%"
+
+        factors_text = (
+            "\n".join(f"- {f}" for f in contextual_factors[:4])
+            if contextual_factors
+            else "- (no major additional signals detected)"
+        )
+
+        news_text = ""
+        if news:
+            news_lines = []
+            for item in news[:3]:
+                title = item.get("title", "")
+                source = item.get("source", "")
+                if not title:
+                    continue
+                if source:
+                    news_lines.append(f"- {title} ({source})")
+                else:
+                    news_lines.append(f"- {title}")
+            if news_lines:
+                news_text = "Recent mentions:\n" + "\n".join(news_lines)
+
+        prompt = f"""
+You are assisting users of a Steam discount forecast tool.
+
+Game: {game_name}
+Model estimates:
+- Next 30 days discount probability: {p30}
+- Next 60 days discount probability: {p60}
+
+Contextual signals:
+{factors_text}
+
+{news_text}
+
+Write EXACTLY 3 concise bullet points:
+- Summarise likelihood of discount in 30d and 60d.
+- Give a clear, pragmatic recommendation (e.g. lean buy now vs lean wait).
+- Be cautious: no guarantees, no hype.
+- Total response under 70 words.
+- Output ONLY the 3 bullets, each on its own line, no numbering or extra text.
+"""
+
+        response = self._openai_client.responses.create(
+            model=self._openai_model,
+            input=prompt,
+            max_output_tokens=160,
+        )
+
+        try:
+            raw = response.output[0].content[0].text
+        except Exception:
+            return []
+
+        lines = [
+            line.strip("•*- ").strip()
+            for line in (raw or "").splitlines()
+            if line.strip()
+        ]
+        bullets = [ln for ln in lines if ln][:3]
+        return bullets
+    
     def _make_confidence_comment(self, score: float, horizon: str, will_discount: bool) -> str:
         """
         This function creates a friendly comment based on the prediction score.
@@ -431,4 +650,4 @@ class InsightService:
         return summary
 
     
-insight_service = InsightService(openai_enabled=False)
+insight_service = InsightService(openai_enabled=True)

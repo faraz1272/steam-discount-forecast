@@ -12,6 +12,29 @@ from src.steam_sale.config import settings
 from src.steam_sale.logging_setup import logger
 from src.steam_sale.exceptions import ModelNotLoadedError, BadRequestError
 
+ARTIFACTS_ROOT = Path(__file__).resolve().parents[3] / "artifacts"
+
+def _to_artifact_path(raw: Path) -> Path:
+    """
+    Normalize any configured path so it maps into our artifacts directory.
+
+    - Strips any accidental quotes in the env value.
+    - If the path contains 'artifacts', we strip everything up to and including
+      'artifacts' and re-root it under ARTIFACTS_ROOT.
+    - Otherwise, we treat it as relative to ARTIFACTS_ROOT.
+    """
+    # Convert to string and strip whitespace + stray quotes
+    raw_str = str(raw).strip().strip('"').strip("'")
+    raw_path = Path(raw_str)
+
+    if "artifacts" in raw_path.parts:
+        idx = raw_path.parts.index("artifacts")
+        # everything *after* 'artifacts/'
+        relative = Path(*raw_path.parts[idx + 1 :])
+        return ARTIFACTS_ROOT / relative
+    else:
+        return ARTIFACTS_ROOT / raw_path
+
 # using joblib for model loading
 try:
     import joblib
@@ -91,51 +114,89 @@ class ModelService:
 
     def load(self) -> None:
         """
-        This function loads both 30 days and 60 days models and, 
-        feature list from disk excactly once.
+        Load 30-day & 60-day models and feature list from disk exactly once.
+
+        Supports either:
+        - MODEL_*_PATH pointing directly to a .pkl file, or
+        - MODEL_*_PATH pointing to a directory containing one or more .pkl files,
+          in which case the 'latest' (sorted) one is used.
         """
 
         logger.info("loading_model_artifacts")
 
-        # Checking if joblib is available
         if not joblib:
             logger.error("joblib_not_available")
             raise ModelNotLoadedError("joblib is not installed. Run: pip install joblib")
-        
-        # Resolving model paths
-        model_30d_path = Path(getattr(settings, "MODEL_30D_PATH", ""))
-        model_60d_path = Path(getattr(settings, "MODEL_60D_PATH", ""))
-        features_path = Path(getattr(settings, "FEATURES_PATH", ""))
 
-        # Loading 30 days model
+        def _resolve_model_path(raw: str, horizon: str) -> Path:
+            """
+            Given a raw path string (file or directory), return a concrete .pkl Path.
+            """
+            base = Path(raw)
+
+            # Case 1: explicit file path
+            if base.is_file():
+                return base
+
+            # Case 2: directory → pick latest .pkl
+            if base.is_dir():
+                candidates = sorted(base.glob("*.pkl"))
+                if not candidates:
+                    logger.error(
+                        "no_model_files_in_dir",
+                        extra={"dir": str(base), "horizon": horizon},
+                    )
+                    raise ModelNotLoadedError(f"No .pkl models found in {base} for {horizon}")
+                chosen = candidates[-1]
+                logger.info(
+                    "model_file_resolved_from_dir",
+                    extra={"dir": str(base), "chosen": str(chosen), "horizon": horizon},
+                )
+                return chosen
+
+            # Neither file nor dir → invalid path
+            logger.error(
+                "model_path_invalid",
+                extra={"path": raw, "horizon": horizon},
+            )
+            raise ModelNotLoadedError(f"Model path {raw} for {horizon} is neither a file nor a directory")
+
+        # --- resolve paths from settings (which may be file OR dir) ---
+        model_30d_path = _resolve_model_path(settings.MODEL_30D_PATH, "30d")
+        model_60d_path = _resolve_model_path(settings.MODEL_60D_PATH, "60d")
+        features_path = Path(settings.FEATURES_PATH)
+
+        # --- load models ---
         if not model_30d_path.exists():
             logger.error("model_30d_missing", extra={"path": str(model_30d_path)})
             raise ModelNotLoadedError(f"30d model not found at {model_30d_path}")
         self.model_30d = joblib.load(model_30d_path)
 
-        # Loading 60 days model
         if not model_60d_path.exists():
             logger.error("model_60d_missing", extra={"path": str(model_60d_path)})
             raise ModelNotLoadedError(f"60d model not found at {model_60d_path}")
         self.model_60d = joblib.load(model_60d_path)
 
-        # Loading feature names
+        # --- load feature names ---
         if not features_path.exists():
             logger.error("features_file_missing", extra={"path": str(features_path)})
             raise ModelNotLoadedError(f"Features list not found at {features_path}")
-        with open(features_path, "r") as f:
+        with features_path.open("r") as f:
             self.feature_names = json.load(f)
 
-        # Initializing ITAD client if API key is provided
-        itad_api_key = getattr(settings, "ITAD_API_KEY", None)
-        itad_base_url = getattr(settings, "ITAD_BASE_URL", None) # modify in config if needed
+        # --- init ITAD client ---
+        itad_api_key = settings.ITAD_API_KEY
+        itad_base_url = settings.ITAD_BASE_URL
         self.itad = ItadClient(api_key=itad_api_key, base_url=itad_base_url)
 
-        logger.info("model_artifacts_loaded_successfully", extra={
-            "model_30d_path": str(model_30d_path),
-            "model_60d_path": str(model_60d_path),
-            "features_path": str(features_path),
-        })
+        logger.info(
+            "model_artifacts_loaded_successfully",
+            extra={
+                "model_30d_path": str(model_30d_path),
+                "model_60d_path": str(model_60d_path),
+                "features_path": str(features_path),
+            },
+        )
 
     def _vectorize(self, features: Dict[str, Any]) -> np.ndarray:
         """

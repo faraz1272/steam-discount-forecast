@@ -151,6 +151,72 @@ class ItadClient:
         
         return data
     
+    def get_price_overview_v3(self, itad_ids: list[str], country: str = "US") -> list[dict]:
+        """
+        Calls /games/prices/v3 for one or more ITAD IDs.
+        Returns the raw list (one element per id).
+        """
+        url = f"{self.base_url}/games/prices/v3"
+        params = {"country": country, "key": self.api_key}
+        resp = requests.post(url, params=params, json=itad_ids, timeout=5)
+        resp.raise_for_status()
+        return resp.json() or []
+    
+    def pick_current_price(self, price_block: dict, prefer_shops: tuple[int, ...] = (61,)) -> tuple[float | None, str | None, str | None]:
+        """
+        From a single element of /games/prices/v3 (the object for one game),
+        choose a 'current' price:
+          1) Prefer Steam (shop id 61) if present.
+          2) Otherwise pick the lowest 'price.amount' across deals.
+        Returns: (amount, currency, shop_name) or (None, None, None) if not found.
+        """
+        deals = (price_block or {}).get("deals") or []
+        if not deals:
+            return None, None, None
+
+        # 1) Prefer Steam (or any preferred shops)
+        for d in deals:
+            shop = (d.get("shop") or {})
+            if shop.get("id") in prefer_shops:
+                p = d.get("price") or {}
+                return p.get("amount"), p.get("currency"), shop.get("name")
+
+        # 2) Else lowest across all deals
+        best = None
+        for d in deals:
+            p = d.get("price") or {}
+            amt = p.get("amount")
+            if isinstance(amt, (int, float)):
+                if best is None or amt < best[0]:
+                    shop = (d.get("shop") or {})
+                    best = (amt, p.get("currency"), shop.get("name"))
+        return best if best else (None, None, None)
+
+    def get_current_price_simple(self, itad_id: str, country: str = "US") -> tuple[float | None, str | None, str | None]:
+        """
+        Convenience wrapper for a single game id.
+        """
+        data = self.get_price_overview_v3([itad_id], country=country)
+        if not data:
+            return None, None, None
+        return self.pick_current_price(data[0])
+
+    @staticmethod
+    def extract_best_price_from_prices(entry: dict) -> float | None:
+        """
+        From one /games/prices/v3 entry, return lowest 'price.amount' across 'deals'.
+        """
+        try:
+            deals = entry.get("deals") or []
+            amounts = []
+            for d in deals:
+                p = (d.get("price") or {}).get("amount")
+                if p is not None:
+                    amounts.append(float(p))
+            return min(amounts) if amounts else None
+        except Exception:
+            return None
+    
     def get_game_shops(self, itad_id: str) -> list[str]:
         """
         Gets list of shop names (e.g. Steam, GOG, Epic) where this game appears.

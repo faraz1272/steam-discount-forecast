@@ -1,0 +1,12 @@
+.venv
+__pycache__/
+*.pyc
+.git
+.gitignore
+.artifacts_tmp/
+artifacts/*.ipynb
+artifacts/*.csv
+artifacts/cache/
+node_modules
+.env
+.DS_Store

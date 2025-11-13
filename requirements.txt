@@ -1,14 +1,13 @@
-pandas
-numpy
-scipy
-scikit-learn
-matplotlib
-seaborn
-requests
+fastapi==0.115.2
+uvicorn[standard]==0.31.1
+jinja2==3.1.4
 
-xgboost
-lightgbm
-catboost
+pandas==2.2.3
+numpy==1.26.4
+scipy==1.14.1
+scikit-learn==1.5.2
+lightgbm==4.5.0
 
-tensorflow
-keras
+requests==2.32.3
+pydantic-settings==2.6.1
+openai==1.55.3

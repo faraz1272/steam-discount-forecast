@@ -1,48 +1,340 @@
-from fastapi import FastAPI, HTTPException, Request, Query
-from fastapi.responses import JSONResponse
+from datetime import datetime, date
 from time import perf_counter
-from typing import List
+from typing import List, Dict, Any
+
+import json
+import os
+
+from fastapi import FastAPI, HTTPException, Request, Query
+from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.templating import Jinja2Templates
 
 from src.steam_sale.config import settings
+from src.steam_sale.exceptions import (
+    SteamSaleError,
+    ModelNotLoadedError,
+    BadRequestError,
+)
+from src.steam_sale.feature_builder import feature_builder
+from src.steam_sale.insights import insight_service
+from src.steam_sale.itad_client import itad_client
 from src.steam_sale.logging_setup import logger
 from src.steam_sale.models.predictor import model_service
 from src.steam_sale.schemas import (
-    PredictRequest, 
-    PredictResponse, 
-    HealthResponse, 
+    PredictRequest,
+    PredictResponse,
+    HealthResponse,
     UpcomingGame,
     GameSearchResult,
     PredictFromItadRequest,
     PredictFromItadResponse,
 )
-from src.steam_sale.exceptions import SteamSaleError, ModelNotLoadedError, BadRequestError
-from src.steam_sale.insights import insight_service
-from src.steam_sale.itad_client import itad_client
-from src.steam_sale.feature_builder import feature_builder
 
+# -----------------------------------------------------------------------------
+# FastAPI app
+# -----------------------------------------------------------------------------
 
 app = FastAPI(
-    title=settings.APP_NAME if hasattr(settings, "APP_NAME") else "Steam Sale Prediction API",
+    title=getattr(settings, "APP_NAME", "Steam Sale Prediction API"),
     default_response_class=JSONResponse,
 )
 
+# base dir: project root (steam-discount-forecast/)
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+
+# precomputed upcoming games file (from upcoming_precompute.py)
+UPCOMING_FILE = os.path.join(BASE_DIR, "artifacts", "upcoming_predictions.json")
+
+# Jinja2 templates
+templates = Jinja2Templates(
+    directory=os.path.join(os.path.dirname(__file__), "templates")
+)
+
+# -----------------------------------------------------------------------------
+# Helper functions
+# -----------------------------------------------------------------------------
+
+
+def _pick_itad_candidate(title: str, results: list[dict]) -> dict | None:
+    """
+    From a list of ITAD search results, pick the best matching candidate.
+    If no exact match, return the first result as a fallback.
+    """
+    if not results:
+        return None
+
+    title_lower = title.lower().strip()
+
+    for r in results:
+        candidate_name = (r.get("name") or r.get("title") or "").lower().strip()
+        if candidate_name == title_lower:
+            return r
+
+    return results[0]
+
+
+def _parse_release_date(value: str | None):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value).date()
+    except Exception:
+        return None
+
+
+def _extract_image_url_from_itad(game_info: dict | None, appid: int | None) -> str | None:
+    """
+    Prefer ITAD assets if present, otherwise fall back to Steam header.
+    """
+    if not isinstance(game_info, dict):
+        if appid:
+            return f"https://steamcdn-a.akamaihd.net/steam/apps/{appid}/header.jpg"
+        return None
+
+    assets = game_info.get("assets") or {}
+    if isinstance(assets, dict):
+        for key in ("boxart", "banner600", "banner400", "banner300", "banner145"):
+            url = assets.get(key)
+            if isinstance(url, str) and url.strip():
+                return url.strip()
+
+    if appid:
+        return f"https://steamcdn-a.akamaihd.net/steam/apps/{appid}/header.jpg"
+
+    return None
+
+
+# -----------------------------------------------------------------------------
+# Search + predict by title (ITAD + combined insights)
+# -----------------------------------------------------------------------------
+
+
+@app.get("/predict/search", response_model=GameSearchResult)
+async def predict_by_title(
+    title: str = Query(..., description="Game title to search via ITAD"),
+):
+    """
+    Search a game by title via ITAD, build features, run 30d + 60d models,
+    and return a combined insights object for the UI search card.
+    """
+    logger.info("predict_search_requested", extra={"title": title})
+
+    if not itad_client.is_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="ITAD integration is not configured on this deployment.",
+        )
+
+    # 1) Search ITAD
+    try:
+        search_results = itad_client.search_game(title=title, limit=5)
+    except Exception as e:
+        logger.error(
+            "predict_search_itad_failed",
+            extra={"title": title, "error": str(e)},
+        )
+        raise HTTPException(status_code=502, detail="Failed to query ITAD")
+
+    if not search_results:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No ITAD match found for '{title}'. Try a different spelling.",
+        )
+
+    candidate = _pick_itad_candidate(title, search_results)
+    if not candidate:
+        raise HTTPException(status_code=404, detail="No suitable ITAD candidate found")
+
+    itad_id = candidate.get("itad_id")
+    if not itad_id:
+        raise HTTPException(status_code=500, detail="Malformed ITAD search result")
+
+    # 2) Detailed info from ITAD
+    try:
+        game_info = itad_client.get_game_info(itad_id)
+    except Exception as e:
+        logger.error(
+            "predict_search_gameinfo_failed",
+            extra={"title": title, "itad_id": itad_id, "error": str(e)},
+        )
+        raise HTTPException(status_code=502, detail="Failed to fetch ITAD game info")
+
+    appid = int(game_info.get("appid") or 0)
+    official_name = (
+        game_info.get("title")
+        or game_info.get("name")
+        or candidate.get("title")
+        or candidate.get("name")
+        or title
+    )
+    release_raw = game_info.get("releaseDate") or game_info.get("release_date")
+    release_dt = _parse_release_date(release_raw)
+    launch_price = game_info.get("price") or None
+    image_url = _extract_image_url_from_itad(game_info, appid)
+
+    # NEW: live price via prices/v3
+    price_amount, price_ccy, price_shop = itad_client.get_current_price_simple(
+        itad_id=itad_id,
+        country="US",   # or settings.ITAD_COUNTRY if you added one
+    )
+
+    # Use numeric amount for the UI; keep currency if you want to show it
+    launch_price = price_amount  # float or None
+
+    # 3) If already released -> no calibrated forecast, return info-style result
+    if release_dt and release_dt < date.today():
+        bullets = [
+            "This game has already released.",
+            "WaitForIt focuses on upcoming titles and launch-window discounts.",
+            "Please check current store prices directly for real-time deals.",
+        ]
+
+        return GameSearchResult(
+            appid=appid,
+            name=official_name,
+            release_date=release_raw,
+            price=launch_price,
+            image_url=image_url,
+            score_30d=0.0,
+            score_60d=0.0,
+            will_discount_30d=False,
+            will_discount_60d=False,
+            insights={
+                "score_30d": 0.0,
+                "score_60d": 0.0,
+                "will_discount_30d": False,
+                "will_discount_60d": False,
+                "contextual_factors": [],
+                "news": [],
+                "bullets": bullets,
+            },
+        )
+
+    # 4) Build features from ITAD info
+    try:
+        features = feature_builder.build_from_itad(appid=appid, game=game_info)
+    except Exception as e:
+        logger.error(
+            "predict_search_feature_build_failed",
+            extra={"title": title, "appid": appid, "error": str(e)},
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Could not build features from ITAD data for this game.",
+        )
+
+    # 5) Run both horizons
+    try:
+        pred_30 = model_service.predict(
+            horizon="30d",
+            appid=appid,
+            features=features,
+            threshold=None,
+        )
+        pred_60 = model_service.predict(
+            horizon="60d",
+            appid=appid,
+            features=features,
+            threshold=None,
+        )
+    except Exception as e:
+        logger.error(
+            "predict_search_model_failed",
+            extra={"title": title, "appid": appid, "error": str(e)},
+        )
+        raise HTTPException(status_code=500, detail="Prediction failed for this title")
+
+    # 6) Combined insights (3 bullets + news etc.)
+    insights = insight_service.build_combined_insights(
+        appid=appid,
+        game_name=official_name,
+        pred_30=pred_30,
+        pred_60=pred_60,
+        features=features,
+    )
+
+    # 7) Response for frontend search card
+    return GameSearchResult(
+        appid=appid,
+        name=official_name,
+        release_date=release_raw,
+        price=launch_price,
+        image_url=image_url,
+        score_30d=pred_30["score"],
+        score_60d=pred_60["score"],
+        will_discount_30d=pred_30["will_discount"],
+        will_discount_60d=pred_60["will_discount"],
+        insights=insights,
+    )
+
+@app.get("/games/search")
+async def suggest_games(title: str, limit: int = 8) -> List[Dict[str, Any]]:
+    """
+    Return minimal suggestions for the typeahead.
+    Uses ITAD search and returns [{itad_id, title}] (plus appid/assets if available).
+    """
+    if not itad_client.is_enabled():
+        raise HTTPException(status_code=503, detail="ITAD client not configured")
+
+    try:
+        # NOTE: use the plural method you have implemented on your client
+        results = itad_client.search_game(title=title, limit=limit)  # <-- plural
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"ITAD search failed: {e}")
+
+    out: List[Dict[str, Any]] = []
+    for r in results or []:
+        out.append({
+            "itad_id": r.get("id") or r.get("itad_id"),
+            "title": r.get("title") or r.get("name"),
+            # include appid/asset if present in your client response (optional):
+            "appid": r.get("appid"),
+            "assets": r.get("assets") or {},
+        })
+    return out
+
+# -----------------------------------------------------------------------------
+# Home: render dashboard with upcoming games
+# -----------------------------------------------------------------------------
+
+
+@app.get("/", response_class=HTMLResponse)
+async def home(request: Request):
+    """
+    WaitForIt dashboard.
+    Uses precomputed upcoming_predictions.json from upcoming_precompute.py.
+    """
+    try:
+        with open(UPCOMING_FILE, "r", encoding="utf-8") as f:
+            games = json.load(f)
+    except Exception as e:
+        logger.warning(
+            "upcoming_file_load_failed",
+            extra={"path": UPCOMING_FILE, "error": str(e)},
+        )
+        games = []
+
+    return templates.TemplateResponse(
+        "index.html",
+        {
+            "request": request,
+            "games": games,
+            "app_name": "WaitForIt",
+        },
+    )
+
+
+# -----------------------------------------------------------------------------
+# Request logging middleware
+# -----------------------------------------------------------------------------
+
+
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    """
-    Middleware that logs each HTTP request:
-    - method (GET/POST)
-    - path (/predict, /health, etc.)
-    - status code (200, 400, 500...)
-    - how long it took (ms)
-    """
-    start_time = perf_counter()  # recording the time before handling the request
+    start_time = perf_counter()
+    response = await call_next(request)
+    duration_ms = (perf_counter() - start_time) * 1000.0
 
-    response = await call_next(request)  # waiting for FastAPI to process the request
-
-    end_time = perf_counter()  # recording the time after response is ready
-    duration_ms = (end_time - start_time) * 1000.0  # converting to milliseconds
-
-    # Using JSON logger so logs are structured and machine-readable
     logger.info(
         "request_completed",
         extra={
@@ -55,6 +347,12 @@ async def log_requests(request: Request, call_next):
 
     return response
 
+
+# -----------------------------------------------------------------------------
+# Startup: load models
+# -----------------------------------------------------------------------------
+
+
 @app.on_event("startup")
 async def startup_event():
     try:
@@ -63,18 +361,19 @@ async def startup_event():
     except SteamSaleError as e:
         logger.exception("startup_failed", extra={"error": str(e)})
 
-# Health check endpoint
+
+# -----------------------------------------------------------------------------
+# Health
+# -----------------------------------------------------------------------------
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
-    """Checks if the models are loaded and the servie is reunning."""
-
+    """Checks if the models are loaded and the service is running."""
     loaded_30 = model_service.model_30d is not None
     loaded_60 = model_service.model_60d is not None
 
-    if loaded_30 and loaded_60:
-        status = "healthy"
-    else:
-        status = "loading"
+    status = "ok" if (loaded_30 and loaded_60) else "loading"
 
     return HealthResponse(
         status=status,
@@ -82,14 +381,23 @@ async def health_check():
         model_60d_loaded=loaded_60,
     )
 
-@app.post("/predict", response_model=PredictResponse)
-async def predict(payload: PredictRequest,
-                  include_insights: bool = Query(False, description="If true, inclue insights in response")):
-    """This is the main prediction endpoint.
-    It accepts a PredictRequest, calls model_service to get a prediction,
-    and returns a PredictResponse.
-    """
 
+# -----------------------------------------------------------------------------
+# Core prediction endpoint (API-first, single horizon)
+# -----------------------------------------------------------------------------
+
+
+@app.post("/predict", response_model=PredictResponse)
+async def predict(
+    payload: PredictRequest,
+    include_insights: bool = Query(
+        False, description="If true, include single-horizon insights in response"
+    ),
+):
+    """
+    Main programmatic prediction endpoint.
+    This is API-first; frontend uses /predict/search + precomputed upcoming instead.
+    """
     try:
         result = model_service.predict(
             appid=payload.appid,
@@ -108,212 +416,86 @@ async def predict(payload: PredictRequest,
             result["insights"] = insights
 
         return PredictResponse(**result)
+
     except BadRequestError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except ModelNotLoadedError as e:
         raise HTTPException(status_code=503, detail=str(e))
     except SteamSaleError as e:
-        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
-    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal error: {str(e)}",
+        )
+    except Exception:
         logger.exception("unhandled_error")
-        raise HTTPException(status_code=500, detail="An unexpected error occurred")
-    
-    
-# Mock data for upcoming games (for now).
-# Later you will replace this with real ingested data.
-SAMPLE_UPCOMING_GAMES = [
-    {
-        "appid": 999001,
-        "name": "Starfall Tactics",
-        "release_date": "2025-12-10",
-        "image_url": "https://steamcdn-a.akamaihd.net/steam/apps/999001/header.jpg",
-        # Minimal example features; in your real version make sure all required features are filled.
-        "features": {
-            "log_launch_price": 3.9,
-            "publisher_size_log": 3.2,
-            "release_year": 2025,
-            "release_quarter": 4,
-            "release_month": 12,
-            "release_weekday": 3,
-            "is_holiday_season": 1,
-            "is_summer_sale_window": 0,
-            "early_access": 0,
-            "mature": 0,
-            "Achievements": 1,
-            "is_multiplatform_refined": 1,
-            "exclusive_steam": 0,
-            "is_multi_store_pc": 1,
-            "is_cross_platform": 1,
-            "genre_cluster_strategy_sim": 0,
-            "genre_cluster_mmo": 0,
-            "is_autumn_sale_window": 0,
-            "within_7d_of_steam_sale": 0,
-            "franchise_count_prev": 1,
-            "developer_size_log": 2.5,
-            "publisher_size_bin__Small (≤5)": 0,
-            "publisher_size_bin__Medium (6–15)": 0,
-            "publisher_size_bin__Large (16–50)": 0,
-            "publisher_size_bin__Major (>50)": 1,
-            "developer_size_bin__Solo/Indie (≤2)": 0,
-            "developer_size_bin__Small (3–5)": 0,
-            "developer_size_bin__Mid (6–15)": 1,
-            "developer_size_bin__Large (>15)": 0,
-            "price_x_multiplatform": 15.0,
-            "publisher_x_multiplatform": 8.0,
-            "developer_x_multiplatform": 5.0,
-            "price_x_pubsize": 10.0,
-            "price_x_devsize": 7.5,
-        },
-    },
-    {
-        "appid": 999002,
-        "name": "Neon Outlaws",
-        "release_date": "2026-01-20",
-        "image_url": "https://steamcdn-a.akamaihd.net/steam/apps/999002/header.jpg",
-        "features": {
-            "log_launch_price": 3.4,
-            "publisher_size_log": 1.4,
-            "release_year": 2026,
-            "release_quarter": 1,
-            "release_month": 1,
-            "release_weekday": 2,
-            "is_holiday_season": 0,
-            "is_summer_sale_window": 0,
-            "early_access": 1,
-            "mature": 0,
-            "Achievements": 1,
-            "is_multiplatform_refined": 0,
-            "exclusive_steam": 1,
-            "is_multi_store_pc": 0,
-            "is_cross_platform": 0,
-            "genre_cluster_strategy_sim": 0,
-            "genre_cluster_mmo": 0,
-            "is_autumn_sale_window": 0,
-            "within_7d_of_steam_sale": 0,
-            "franchise_count_prev": 0,
-            "developer_size_log": 1.2,
-            "publisher_size_bin__Small (≤5)": 1,
-            "publisher_size_bin__Medium (6–15)": 0,
-            "publisher_size_bin__Large (16–50)": 0,
-            "publisher_size_bin__Major (>50)": 0,
-            "developer_size_bin__Solo/Indie (≤2)": 1,
-            "developer_size_bin__Small (3–5)": 0,
-            "developer_size_bin__Mid (6–15)": 0,
-            "developer_size_bin__Large (>15)": 0,
-            "price_x_multiplatform": 0.0,
-            "publisher_x_multiplatform": 0.0,
-            "developer_x_multiplatform": 0.0,
-            "price_x_pubsize": 5.0,
-            "price_x_devsize": 4.0,
-        },
-    },
-]
-    
-    
+        raise HTTPException(
+            status_code=500,
+            detail="An unexpected error occurred",
+        )
+
+
+# -----------------------------------------------------------------------------
+# Upcoming games API (backed by precomputed file)
+# -----------------------------------------------------------------------------
+
+
 @app.get("/games/upcoming", response_model=List[UpcomingGame])
 async def get_upcoming_games():
     """
-    Returns a small list of upcoming games with:
-    - image, name, release_date
-    - model prediction (uses existing ModelService)
-    - insights (using InsightsService)
-
-    For now this uses SAMPLE_UPCOMING_GAMES.
-    Later will be replaced with a real ingestion pipeline.
+    Returns upcoming games with precomputed predictions + insights.
+    Data is generated by upcoming_precompute.py into upcoming_predictions.json.
     """
+    try:
+        with open(UPCOMING_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=503,
+            detail="Upcoming games data not generated yet.",
+        )
+    except Exception as e:
+        logger.warning(
+            "upcoming_file_load_failed",
+            extra={"path": UPCOMING_FILE, "error": str(e)},
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to load upcoming games data.",
+        )
 
-    upcoming: List[UpcomingGame] = []
+    return data
 
-    for game in SAMPLE_UPCOMING_GAMES:
-        appid = game["appid"]
-        name = game["name"]
-        release_date = game["release_date"]
-        image_url = game["image_url"]
-        features = game["features"]
 
-        try:
-            result = model_service.predict(
-                horizon="30d",
-                appid=appid,
-                features=features,
-                threshold=None,
-            )
+# -----------------------------------------------------------------------------
+# ITAD-based prediction endpoint (for future tooling / debugging)
+# -----------------------------------------------------------------------------
 
-            insights = insight_service.build_insights(
-                appid=appid,
-                prediction=result,
-                features=features,
-                game_name=name,
-            )
-
-            upcoming.append(
-                UpcomingGame(
-                    appid=appid,
-                    name=name,
-                    release_date=release_date,
-                    image_url=image_url,
-                    horizon=result["horizon"],
-                    will_discount=result["will_discount"],
-                    score=result["score"],
-                    threshold=result["threshold"],
-                    insights=insights,
-                )
-            )
-
-        except Exception as e:
-            logger.warning(
-                "upcoming_game_prediction_failed",
-                extra={"appid": appid, "game_name": name, "error": str(e)},
-            )
-            continue
-
-    return upcoming
-
-@app.get("/games/search")
-async def search_games(title: str, limit: int = 5):
-    """
-    Search for games by title using ITAD.
-    Returns a list of possible matches with their itad_id and name.
-    """
-    if not itad_client.is_enabled():
-        raise HTTPException(status_code=503, detail="ITAD client not configured")
-
-    results = itad_client.search_game(title=title, limit=limit)
-    if not results:
-        raise HTTPException(status_code=404, detail="No results found")
-
-    return results
 
 @app.post("/predict/from_itad", response_model=PredictFromItadResponse)
 async def predict_from_itad(payload: PredictFromItadRequest) -> PredictFromItadResponse:
     """
-    Uses ITAD game info + our FeatureBuilder to create features,
-    then run the model and attach insights.
-
-    Flow:
-    - takes itad_id from client (selected from /games/search)
-    - fetches game info from ITAD
-    - builds features
-    - calls model_service.predict(...)
-    - optionally add insights
+    Uses ITAD game info + FeatureBuilder to create features, run the model,
+    and (optionally) attach single-horizon insights.
     """
     if not itad_client.is_enabled():
         raise HTTPException(status_code=503, detail="ITAD client not configured")
 
-    # fetching detailed info from ITAD
     info = itad_client.get_game_info(payload.itad_id)
     if not info:
-        raise HTTPException(status_code=404, detail="Could not fetch game info from ITAD")
+        raise HTTPException(
+            status_code=404,
+            detail="Could not fetch game info from ITAD",
+        )
 
-    # getting appid from the info payload
     appid = info.get("appid")
     if appid is None:
-        raise HTTPException(status_code=400, detail="Game info from ITAD missing Steam appid")
+        raise HTTPException(
+            status_code=400,
+            detail="Game info from ITAD missing Steam appid",
+        )
 
-    # building model features from ITAD data
     features = feature_builder.build_from_itad(appid=appid, game=info)
 
-    # running prediction using ModelService
     result = model_service.predict(
         horizon=payload.horizon,
         appid=appid,
@@ -321,21 +503,18 @@ async def predict_from_itad(payload: PredictFromItadRequest) -> PredictFromItadR
         threshold=payload.threshold,
     )
 
-    # optional insights
     insights = None
+    name = info.get("title") or info.get("name")
+
     if payload.include_insights:
-        name = info.get("title") or info.get("name")
         insights = insight_service.build_insights(
             appid=appid,
             prediction=result,
             features=features,
             game_name=name,
         )
-    else:
-        name = info.get("title") or info.get("name")
 
-    # image URL for UI
-    image_url = f"https://steamcdn-a.akamaihd.net/steam/apps/{appid}/header.jpg"
+    image_url = _extract_image_url_from_itad(info, appid)
 
     return PredictFromItadResponse(
         appid=appid,

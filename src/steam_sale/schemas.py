@@ -83,6 +83,13 @@ class GameSearchResult(BaseModel):
     appid: Optional[int] = None
     name: str
     release_date: Optional[str] = None
+    price: Optional[float] = None
+    image_url: Optional[str] = None
+    score_30d: Optional[float] = None
+    score_60d: Optional[float] = None
+    will_discount_30d: Optional[bool] = None
+    will_discount_60d: Optional[bool] = None
+    insights: Optional[Dict[str, Any]] = None
 
 
 class PredictFromItadRequest(BaseModel):
