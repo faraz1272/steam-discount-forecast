@@ -1,4 +1,4 @@
-# **WaitForIt — Steam Discount Prediction**
+# **WaitForIt - Price Drop Incoming?**
 ### *Never overpay for a game again.*
 
 ---
