@@ -4,7 +4,7 @@
 ---
 
 <p align="center">
-  <img src="homepage_screenshot.png" alt="WaitForIt Homepage" width="700"/>
+  <img src="images/homepage.png" alt="WaitForIt Homepage" width="700"/>
 </p>
 
 ---
@@ -64,4 +64,12 @@ That idea turned into **WaitForIt** — a machine-learning powered companion tha
 ```json
 {
   "app_id": 123456
+}
+
+**Response**
+```json
+{
+  "prob_30d": 0.72,
+  "prob_60d": 0.91,
+  "decision": "Likely to discount — Wait"
 }
